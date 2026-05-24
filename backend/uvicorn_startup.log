@@ -1,0 +1,60 @@
+D:\automation_project\automation_projectsdlc-ai-orchestrator\backend\.venv\Lib\site-packages\langgraph\checkpoint\base\__init__.py:17: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+INFO:     Started server process [13392]
+INFO:     Waiting for application startup.
+Downloading pydantic-core (2.0MiB)
+Downloading burner-redis (1.1MiB)
+Downloading rapidfuzz (1.5MiB)
+Downloading lupa (1.9MiB)
+Downloading lxml (3.9MiB)
+ Downloaded burner-redis
+ Downloaded rapidfuzz
+ Downloaded pydantic-core
+ Downloaded lupa
+ Downloaded lxml
+Installed 117 packages in 4.13s
+JIRA Cloud MCP Server running on stdio
+npm notice
+npm notice New minor version of npm available! 11.13.0 -> 11.15.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.15.0
+npm notice To update run: npm install -g npm@11.15.0
+npm notice
+C:\Users\USER\AppData\Local\uv\cache\archive-v0\IAUuaHfj7ejueuKE701C4\Lib\site-packages\fastmcp\server\auth\providers\jwt.py:10: AuthlibDeprecationWarning: authlib.jose module is deprecated, please use joserfc instead.
+It will be compatible before version 2.0.0.
+  from authlib.jose import JsonWebKey, JsonWebToken
+C:\Users\USER\AppData\Local\uv\cache\archive-v0\IAUuaHfj7ejueuKE701C4\Lib\site-packages\mcp_atlassian\__init__.py:38: DeprecationWarning: 'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+C:\Users\USER\AppData\Local\uv\cache\archive-v0\IAUuaHfj7ejueuKE701C4\Lib\site-packages\mcp_atlassian\__init__.py:38: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
++-----------------------------------------------------------------------------+
+|                                                                             |
+|                                                                             |
+|                        \u2584\u2580\u2580 \u2584\u2580\u2588 \u2588\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2584\u2580\u2588 \u2588\u2580\u2580 \u2588\u2580\u2588                        |
+|                        \u2588\u2580  \u2588\u2580\u2588 \u2584\u2584\u2588  \u2588  \u2588 \u2580 \u2588 \u2588\u2584\u2584 \u2588\u2580\u2580                        |
+|                                                                             |
+|                                                                             |
+|                                                                             |
+|                               FastMCP 2.14.7                                |
+|                            https://gofastmcp.com                            |
+|                                                                             |
+|                    \U0001f5a5  Server:      Atlassian MCP                            |
+|                    \U0001f680 Deploy free: https://fastmcp.cloud                    |
+|                                                                             |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                          \u2728 FastMCP 3.0 is coming!                          |
+|      Pin `fastmcp < 3` in production, then upgrade when you're ready.       |
++-----------------------------------------------------------------------------+
++-----------------------------------------------------------------------------+
+|                         \U0001f389 Update available: 3.3.1                          |
+|                     Run: pip install --upgrade fastmcp                      |
++-----------------------------------------------------------------------------+
+
+
+WARNING - mcp_atlassian.utils.toolsets - TOOLSETS is not set — currently defaults to all toolsets. In v0.22.0, the default will change to 6 core toolsets only. Set TOOLSETS=all explicitly to preserve current behavior.
+[05/24/26 15:55:09] INFO     Starting MCP server 'Atlassian MCP' server.py:2506
+                             with transport 'stdio'                            
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)

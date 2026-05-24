@@ -1,5 +1,7 @@
 # AEO — Implementation Specification
-### AI Engineering Orchestrator | Full MVP Build Spec | v1.0
+### AI Engineering Orchestrator | Full MVP Build Spec | v1.2
+
+> **v1.2 supersedes parts of this file.** See `docs/superpowers/specs/2026-05-24-aeo-architecture-decisions.md` for the authoritative deltas. In short: (1) connect to **existing** Confluence/Jira/GitHub MCP servers — do not build custom integration servers; (2) **no central `SkillExecutor`** — agents bind a scoped subset of MCP tools, with a logging callback for observability; (3) Architecture + Repo Bootstrap are **one** agent (7 agents total).
 
 ---
 
@@ -7,13 +9,13 @@
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Repo structure | Monorepo | Single repo for /backend, /frontend, /mcp-servers, /agents |
+| Repo structure | Monorepo | Single repo for /backend, /frontend, /agents (no /mcp-servers — see below) |
 | Agent framework | LangGraph | Native state graphs, tool calling, conditional retry edges |
 | LLM provider | Flexible (Anthropic / OpenAI) | Abstract `LLMClient` — swap per agent or per deployment |
-| Atlassian integration | Real Atlassian Cloud | Official Atlassian REST API via MCP servers |
-| GitHub integration | Real GitHub | Via existing mcp__github__ tools |
+| **Integration layer** | **Existing MCP servers** | Connect as an MCP client (`langchain-mcp-adapters`) to the already-configured Confluence/Jira/GitHub MCP servers. We do **not** build or run integration servers. |
+| **Tool governance** | **Scoped per-agent toolsets** | Each agent is bound only the MCP tools it needs. Replaces the central `SkillExecutor`. Observability via a LangGraph callback → `agent_execution_logs`. |
 | **Code authoring** | **GitHub Copilot** | Planning Agent creates a detailed issue and assigns Copilot — Copilot writes all code autonomously |
-| Test execution | Direct subprocess | Simple: pytest/ruff run directly on cloned repo |
+| Test execution | Direct subprocess (in-process, ours) | The only integration we own: clone + pytest/ruff on the cloned repo. No server. |
 | Frontend auth | None (MVP) | Single-user internal dashboard |
 | State store | Supabase (PostgreSQL) | Relational state tracking, free tier |
 
@@ -30,7 +32,8 @@ sdlc-ai-orchestrator/
 │   │   ├── core/              # Config, LLM client abstraction
 │   │   ├── db/                # Supabase client, models
 │   │   ├── orchestrator/      # State machine, dispatcher, retry logic
-│   │   ├── skills/            # Skill executor + skill registry
+│   │   ├── mcp/               # MCP client manager + per-agent scoped toolsets
+│   │   ├── local_exec/        # The only integration we own: clone + pytest + ruff
 │   │   └── main.py
 │   ├── tests/
 │   ├── Dockerfile
@@ -41,11 +44,8 @@ sdlc-ai-orchestrator/
 │   │   ├── components/        # Chat, approval views, monitor
 │   │   └── lib/               # API client to backend
 │   └── package.json
-├── mcp-servers/               # MCP server implementations
-│   ├── confluence/
-│   ├── jira/
-│   ├── github/                # Wrapper around mcp__github__ tools
-│   └── local-execution/
+│                              # NOTE (v1.2): no /mcp-servers — we connect to existing
+│                              # Confluence/Jira/GitHub MCP servers as a client.
 ├── agents/                    # Claude Code agent definitions (existing)
 │   ├── product-manager.md
 │   ├── solution-architecture.md
@@ -312,23 +312,19 @@ GET  /projects/{id}/executions     # All ticket executions for this project
 POST /projects/{id}/chat           # Send message to PM Agent (Phase 1 chat)
 ```
 
-### 6.5 Skill Executor
+### 6.5 Tool Governance (v1.2 — replaces the `SkillExecutor`)
 
-Agents never call APIs directly. They emit a skill request; the orchestrator executes it:
+Agents bind a **scoped subset of MCP tools** (loaded from the existing MCP servers via `langchain-mcp-adapters`). There is no central skill registry. Governance is achieved by:
+
+1. **Scoping** — each agent receives only the tools in its row of the per-agent tool matrix (see the architecture-decisions doc). The MCP client manager exposes a `tools_for(agent_name)` helper.
+2. **Observability** — a LangGraph `BaseCallbackHandler` records every tool call (agent, tool, input, output, token usage, duration, status) to `agent_execution_logs`.
+3. **Constraint enforcement** — because Copilot writes code autonomously, architecture-constraint checks happen post-hoc in the Review Agent, not via pre-commit interception.
+
+The tool surface below is now **provided by the existing MCP servers**, not implemented by us. It is retained here only as a reference of the tools agents draw from. The one exception — `clone_branch`, `run_tests`, `run_linter`, `parse_test_logs` — is our in-process `local_exec` module.
 
 ```python
-# backend/app/skills/executor.py
-
-class SkillExecutor:
-    async def execute(self, skill: str, input: dict) -> dict:
-        handler = self.registry[skill]         # raises if unknown skill
-        self._validate_input(skill, input)     # pydantic schema validation
-        result = await handler(input)
-        await self._log_execution(skill, input, result)
-        return result
-
-# Skills are registered at startup:
-SKILL_REGISTRY = {
+# Reference only — these are MCP-server tools, not a registry we build.
+MCP_TOOL_SURFACE = {
     # GitHub
     "create_github_branch":  github_skills.create_branch,
     "read_github_file":      github_skills.read_file,
@@ -363,29 +359,25 @@ SKILL_REGISTRY = {
 
 ---
 
-## 7. MCP Servers
+## 7. Integration Layer (v1.2 — existing MCP servers, not custom builds)
 
-### 7.1 Confluence MCP (`mcp-servers/confluence/`)
+We **connect** to the Confluence, Jira, and GitHub MCP servers already configured in this environment. We do not implement or run them. The backend uses `langchain-mcp-adapters` `MultiServerMCPClient` to load their tools and bind scoped subsets per agent. Connection details (remote URLs or stdio launch commands) + tokens come from the `MCP_SERVERS` config (see M0 plan).
 
-Thin Python MCP server wrapping the Atlassian Confluence REST API v2.
+### 7.1 Confluence MCP (existing)
 
-**Skills exposed:** `fetch_page`, `create_page`, `update_page`, `search_pages`
+Tools used: `confluence_search`, `confluence_get_page`, `confluence_get_page_children`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment`, `confluence_add_label`.
 
-Auth: Basic auth with `CONFLUENCE_EMAIL` + `CONFLUENCE_API_TOKEN` (base64 encoded).
+### 7.2 Jira MCP (existing)
 
-### 7.2 Jira MCP (`mcp-servers/jira/`)
+Tools used: `jira_list_projects`, `jira_get_project`, `jira_get_field_options`, `jira_get_issue`, `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_get_transitions`, `jira_transition_issue`, `jira_get_issue_link_types`.
 
-Thin Python MCP server wrapping the Atlassian Jira REST API v3.
+**Constraints:** no sub-task `parent` field (use issue type **Task**, link via comment); no `create_issue_link` (document dependencies via comments).
 
-**Skills exposed:** `fetch_issue`, `create_epic`, `create_story`, `update_ticket_status`, `add_comment`, `get_transitions`, `transition_issue`
+### 7.3 GitHub MCP (existing)
 
-Auth: Basic auth with `JIRA_EMAIL` + `JIRA_API_TOKEN`.
+Tools used: `get_me`, `create_repository`, `create_branch`, `list_branches`, `get_file_contents`, `push_files`, `create_or_update_file`, `issue_write`, `assign_copilot_to_issue`, `get_copilot_job_status`, `pull_request_read`, `pull_request_review_write`, `request_copilot_review`, `merge_pull_request`, `add_issue_comment`.
 
-### 7.3 GitHub MCP (`mcp-servers/github/`)
-
-Wrapper around the existing `mcp__github__*` tools — routes skill requests to the correct GitHub MCP tool.
-
-### 7.4 Local Execution MCP (`mcp-servers/local-execution/`)
+### 7.4 Local Execution (`backend/app/local_exec/` — the one integration we own)
 
 Runs directly via subprocess. No Docker for MVP.
 
@@ -461,7 +453,9 @@ class ArchAgentState(TypedDict):
 
 ---
 
-### 8.3 Repo Bootstrap Agent (Phase 1)
+### 8.3 Repo Bootstrap (v1.2 — merged into the Architecture Agent §8.2)
+
+This is **no longer a separate agent.** After the human approves the architecture plan, the Architecture Agent itself creates the repo and injects `docs/ARCHITECTURE.md` + README + skeleton (via `create_repository`, `push_files`). The steps below describe that repo-provisioning behavior, now owned by §8.2.
 
 **Deterministic — minimal LLM use.** Reads the approved architecture plan and generates files.
 
