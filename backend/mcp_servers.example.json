@@ -1,0 +1,27 @@
+{
+  "confluence": {
+    "command": "uvx",
+    "args": ["mcp-atlassian"],
+    "env": {
+      "CONFLUENCE_URL": "https://yourcompany.atlassian.net/wiki",
+      "CONFLUENCE_USERNAME": "you@yourcompany.com",
+      "CONFLUENCE_API_TOKEN": "your_token"
+    }
+  },
+  "jira": {
+    "command": "npx",
+    "args": ["-y", "mcp-server-jira-cloud"],
+    "env": {
+      "JIRA_BASE_URL": "https://yourcompany.atlassian.net",
+      "JIRA_API_TOKEN": "your_token",
+      "JIRA_EMAIL": "you@yourcompany.com"
+    }
+  },
+  "github": {
+    "type": "http",
+    "url": "https://api.githubcopilot.com/mcp",
+    "headers": {
+      "Authorization": "Bearer your_github_pat"
+    }
+  }
+}

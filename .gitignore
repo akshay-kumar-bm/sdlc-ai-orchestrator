@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env
+backend/mcp_servers.json
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

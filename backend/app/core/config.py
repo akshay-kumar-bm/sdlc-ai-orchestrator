@@ -1,8 +1,9 @@
 import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,14 +17,22 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     WEBHOOK_SECRET: str = "change-me"
 
-    # JSON map: { "<server>": { "transport": "...", "url": "...", "headers": {...} } }
-    # or stdio: { "<server>": { "transport": "stdio", "command": "...", "args": [...] } }
+    # Option 1: inline JSON string
     MCP_SERVERS: dict[str, dict[str, Any]] = {}
+    # Option 2: path to a JSON file (takes precedence over MCP_SERVERS if set)
+    MCP_SERVERS_FILE: str | None = None
 
     @field_validator("MCP_SERVERS", mode="before")
     @classmethod
     def _parse_json(cls, v: Any) -> Any:
         return json.loads(v) if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _load_mcp_file(self) -> "Settings":
+        if self.MCP_SERVERS_FILE and self.MCP_SERVERS_FILE.strip():
+            path = Path(self.MCP_SERVERS_FILE)
+            self.MCP_SERVERS = json.loads(path.read_text())
+        return self
 
 
 @lru_cache
