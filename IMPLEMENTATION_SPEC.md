@@ -12,6 +12,7 @@
 | LLM provider | Flexible (Anthropic / OpenAI) | Abstract `LLMClient` — swap per agent or per deployment |
 | Atlassian integration | Real Atlassian Cloud | Official Atlassian REST API via MCP servers |
 | GitHub integration | Real GitHub | Via existing mcp__github__ tools |
+| **Code authoring** | **GitHub Copilot** | Planning Agent creates a detailed issue and assigns Copilot — Copilot writes all code autonomously |
 | Test execution | Direct subprocess | Simple: pytest/ruff run directly on cloned repo |
 | Frontend auth | None (MVP) | Single-user internal dashboard |
 | State store | Supabase (PostgreSQL) | Relational state tracking, free tier |
@@ -163,8 +164,8 @@ def get_llm(model_override: str | None = None):
 | Repo Bootstrap Agent | haiku | Deterministic, no heavy reasoning |
 | Jira Structuring Agent | sonnet | Structured output generation |
 | Planning Agent | sonnet | Repo analysis + plan generation |
-| Dev Agent | sonnet | Code generation |
-| QA Agent | sonnet | Test generation + log parsing |
+| Dev Agent | — | **GitHub Copilot** (no AEO LLM cost) |
+| QA Agent | sonnet | Test log parsing + error report generation |
 | Review Agent | sonnet | Acceptance criteria comparison |
 | Jira Update Agent | haiku | Simple structured writes |
 
@@ -251,13 +252,13 @@ CREATE INDEX idx_agent_logs_ticket ON agent_execution_logs(ticket_execution_id);
 
 # Allowed transitions — the orchestrator enforces these; no agent can bypass
 TICKET_TRANSITIONS = {
-    "AI_READY":        ["PLANNING"],
-    "PLANNING":        ["IN_DEVELOPMENT"],
-    "IN_DEVELOPMENT":  ["IN_QA"],
-    "IN_QA":           ["READY_TO_MERGE", "FIXING", "ESCALATED"],
-    "FIXING":          ["IN_QA", "ESCALATED"],
-    "READY_TO_MERGE":  ["MERGED"],
-    "MERGED":          ["JIRA_UPDATED"],
+    "AI_READY":           ["PLANNING"],
+    "PLANNING":           ["COPILOT_ASSIGNED"],   # Planning Agent assigns Copilot
+    "COPILOT_ASSIGNED":   ["IN_QA"],              # Copilot opens PR → triggers QA
+    "IN_QA":              ["READY_TO_MERGE", "COPILOT_RETRY", "ESCALATED"],
+    "COPILOT_RETRY":      ["IN_QA", "ESCALATED"], # Re-assign Copilot with error context
+    "READY_TO_MERGE":     ["MERGED"],
+    "MERGED":             ["JIRA_UPDATED"],
 }
 
 PROJECT_TRANSITIONS = {
@@ -282,11 +283,12 @@ POST /webhooks/jira     # Jira issue status change events
 POST /webhooks/github   # GitHub PR opened, CI status, PR merged
 
 # Event → Agent routing (handled by dispatcher):
-# jira:issue_status_changed → AI_READY  → Planning Agent
-# github:pr_opened          → QA Agent
+# jira:issue_status_changed → AI_READY  → Planning Agent (creates issue + assigns Copilot)
+# github:pr_opened          → QA Agent  (Copilot opened the PR)
 # github:ci_passed          → Review Agent
 # github:pr_merged          → Jira Update Agent
-# github:ci_failed          → Dev Agent (fix mode, if retry_count < 3)
+# github:ci_failed          → Re-assign Copilot with QA error context (retry_count < 3)
+# github:ci_failed (retry=3)→ ESCALATED → human_approval_request
 ```
 
 ### 6.3 Human Approval Endpoints
@@ -337,7 +339,9 @@ SKILL_REGISTRY = {
     "comment_on_pr":         github_skills.comment_on_pr,
     "get_pr_diff":           github_skills.get_pr_diff,
     "get_ci_status":         github_skills.get_ci_status,
-    "create_github_issue":   github_skills.create_issue,
+    "create_github_issue":       github_skills.create_issue,
+    "assign_copilot_to_issue":   github_skills.assign_copilot,      # triggers Copilot to code
+    "get_copilot_job_status":    github_skills.copilot_job_status,   # poll until PR opened
     # Jira
     "fetch_jira_issue":      jira_skills.fetch_issue,
     "create_epic":           jira_skills.create_epic,
@@ -494,64 +498,107 @@ class ArchAgentState(TypedDict):
 
 **Trigger:** Jira ticket moves to `AI_READY`
 
-**Graph:** `fetch_jira_ticket → fetch_arch_plan → analyze_repo_tree → build_plan → create_github_issue`
+**Graph:** `fetch_jira_ticket → fetch_arch_plan → analyze_repo_tree → build_plan → create_github_issue → assign_copilot_to_issue → poll_until_pr_opened`
 
-**Output (GitHub Issue body):**
-```markdown
-## Implementation Plan: {jira_title}
-
-**Jira:** {ticket_key} | **Epic:** {epic_key}
-
-### Files to Modify
-- `path/to/file.py` — description of change
-
-### Database Changes
-- (if any)
-
-### Tests Required
-- `tests/unit/test_x.py`
-- `tests/integration/test_y.py`
-
-### Acceptance Criteria (from Jira)
-- Given/When/Then items
-```
-
-**Constraint:** Planning Agent must not include files outside the approved architecture folder structure.
-
----
-
-### 8.6 Dev Agent (Phase 2)
-
-**Trigger:** GitHub Issue created by Planning Agent
-
-**Graph:** `read_issue → read_existing_files → read_arch_constraints → generate_code → lint_check → commit_and_pr`
+**This is the most critical Phase 2 agent.** Its GitHub Issue is the sole input Copilot works from — it must be unambiguous and complete.
 
 **State:**
 ```python
-class DevAgentState(TypedDict):
+class PlanningAgentState(TypedDict):
     ticket_execution_id: str
-    github_issue_url: str
-    files_to_write: dict[str, str]    # path → content
-    lint_errors: list[dict]
+    jira_ticket_key: str
+    arch_plan: str
+    repo_tree: list[str]
+    github_issue_url: str | None
+    copilot_job_id: str | None
     pr_url: str | None
-    fix_mode: bool                    # True when called from QA retry
-    qa_error_report: dict | None      # set in fix mode
 ```
 
-**Fix mode:** When called after QA failure, `qa_error_report` contains structured failure info. The agent reads the existing PR diff and the error report, applies targeted fixes, and pushes to the same branch.
+**GitHub Issue format (Copilot-optimised):**
+```markdown
+## Task: {jira_title}
 
-**Enforced constraints (validated by orchestrator before commit):**
-- All file paths must exist in approved folder structure
-- No new top-level directories
-- No modification of `requirements.txt` without Planning Agent specifying it
+**Jira:** {ticket_key} | **Epic:** {epic_key}
+**Branch to create:** `feature/{ticket_key}-{slug}`
+
+---
+
+### Context
+{2-3 sentences on what this feature does and why, taken from Jira description}
+
+### Architecture Constraints
+- Tech stack: {from arch plan}
+- Must not create new top-level directories
+- Must not change requirements.txt unless listed below
+- Follow existing naming and folder conventions (see repo tree below)
+
+### Current Repo Structure (relevant paths)
+```
+{filtered repo tree — only paths relevant to this ticket}
+```
+
+### Files to Create or Modify
+| File | Action | What to implement |
+|---|---|---|
+| `app/api/v1/routes/auth.py` | modify | Add POST /auth/register endpoint |
+| `app/models/user.py` | create | SQLAlchemy User model with fields: id, email, hashed_password, created_at |
+| `app/schemas/user.py` | create | Pydantic UserCreate, UserResponse schemas |
+| `app/services/auth_service.py` | create | register() method: validate email uniqueness, hash password with bcrypt, return JWT |
+| `tests/unit/test_auth_service.py` | create | Unit tests for register() — happy path + duplicate email |
+| `tests/integration/test_auth_routes.py` | create | Integration tests for POST /auth/register |
+
+### Database Changes
+{Alembic migration details if needed, or "None"}
+
+### API Contract
+```
+POST /auth/register
+Request:  { "email": string, "password": string }
+Response 201: { "access_token": string, "token_type": "bearer" }
+Response 409: { "detail": "Email already registered" }
+Response 422: validation error
+```
+
+### Acceptance Criteria (must all pass)
+- [ ] Given valid email+password → returns 201 with JWT
+- [ ] Given duplicate email → returns 409
+- [ ] Password stored as bcrypt hash (never plaintext)
+- [ ] Unit tests pass: pytest tests/unit/test_auth_service.py
+- [ ] Integration tests pass: pytest tests/integration/test_auth_routes.py
+- [ ] ruff check passes with no violations
+
+### Dependencies / Libraries
+- `passlib[bcrypt]` (already in requirements.txt)
+- `python-jose` (already in requirements.txt)
+- Follow pattern in `app/services/existing_service.py` for service structure
+```
+
+**After issue is created:** calls `assign_copilot_to_issue` → Copilot autonomously creates the branch, writes all files, and opens a PR. The orchestrator polls `get_copilot_job_status` until PR is opened, then transitions ticket to `IN_QA`.
+
+**Constraint:** All file paths in the issue must exist in the approved architecture folder structure.
+
+---
+
+### 8.6 GitHub Copilot (Code Authoring)
+
+**Not an AEO agent — this is GitHub Copilot operating natively.**
+
+Copilot receives the Planning Agent's GitHub Issue via `assign_copilot_to_issue` and autonomously:
+1. Creates the feature branch (`feature/{ticket_key}-{slug}`)
+2. Writes all specified files per the issue instructions
+3. Opens a Pull Request linked to the issue
+
+**AEO's role during this step:** passive — the orchestrator polls `get_copilot_job_status` and waits for the `github:pr_opened` webhook event before advancing the state machine.
+
+**No AEO code to write for this step** beyond the two skill wrappers (`assign_copilot_to_issue`, `get_copilot_job_status`).
 
 ---
 
 ### 8.7 QA Agent (Phase 2)
 
-**Trigger:** PR opened by Dev Agent
+**Trigger:** PR opened by Copilot (`github:pr_opened` webhook)
 
-**Graph:** `read_pr_diff → read_test_plan → generate_tests → clone_branch → run_linter → run_tests → evaluate_results → [pass → post_results | fail → build_error_report]`
+**Graph:** `read_pr_diff → read_acceptance_criteria → clone_branch → run_linter → run_tests → evaluate_results → [pass → post_results | fail → build_error_report → re_assign_copilot]`
 
 **On failure:**
 ```python
@@ -559,18 +606,20 @@ error_report = {
     "failing_tests": [...],
     "lint_violations": [...],
     "root_cause_hypothesis": "...",    # LLM-generated
-    "files_to_fix": ["path/to/file.py"],
+    "suggested_fix": "...",            # specific guidance for Copilot retry
 }
 ```
 
-If `retry_count < 3`: send error report to Dev Agent, increment retry, transition to `FIXING`.
+**On retry:** The orchestrator updates the GitHub Issue with a new comment containing the structured error report, then calls `assign_copilot_to_issue` again on the same issue. Copilot pushes a fix commit to the existing branch.
+
+If `retry_count < 3`: add error comment to issue, re-assign Copilot, transition to `COPILOT_RETRY`.
 If `retry_count == 3`: transition to `ESCALATED`, create `human_approval_request` with full failure log.
 
 ---
 
 ### 8.8 Review Agent (Phase 2)
 
-**Trigger:** QA Agent marks tests as passed
+**Trigger:** QA Agent marks all tests and lint as passed
 
 **Graph:** `read_pr_diff → fetch_jira_acceptance_criteria → fetch_arch_plan → run_checklist → [all_pass → approve_pr | issues → request_changes]`
 
@@ -664,13 +713,13 @@ export const api = {
 
 ### Week 3 — Phase 2 Agents
 - [ ] Local Execution MCP (clone, pytest, ruff, log parsing)
-- [ ] Planning Agent (GitHub Issue generation)
-- [ ] Dev Agent (branch, code gen, PR — with fix mode)
-- [ ] QA Agent (test gen, subprocess execution, retry logic)
-- [ ] Review Agent (checklist + PR merge)
+- [ ] `assign_copilot_to_issue` + `get_copilot_job_status` skill wrappers
+- [ ] Planning Agent (rich GitHub Issue generation + Copilot assignment)
+- [ ] QA Agent (PR diff read, subprocess test run, error report, Copilot retry)
+- [ ] Review Agent (acceptance criteria checklist + PR merge)
 - [ ] Jira Update Agent (status + comment)
 - [ ] Webhook handlers (Jira AI_READY, GitHub PR opened/merged/CI)
-- [ ] Ticket state machine with retry cap enforcement
+- [ ] Ticket state machine with `COPILOT_ASSIGNED → IN_QA → COPILOT_RETRY` transitions + retry cap
 
 ### Week 4 — Frontend + Integration
 - [ ] Next.js project scaffold (App Router, TypeScript)
@@ -696,10 +745,10 @@ The MVP is complete when a live end-to-end demo runs without human intervention 
 7. Jira Structuring Agent creates Epics and Stories in real Jira
 8. Human approves Epics and Stories
 9. Human moves one Jira Story to "AI Ready"
-10. Planning Agent creates a GitHub Issue with implementation plan
-11. Dev Agent creates a branch, writes code, opens a PR
-12. QA Agent runs pytest, posts results as PR comment
-13. Review Agent approves and merges the PR
+10. Planning Agent creates a detailed GitHub Issue and assigns GitHub Copilot to it
+11. GitHub Copilot autonomously creates a branch, writes code, and opens a PR
+12. QA Agent clones the branch, runs pytest + ruff, posts results as PR comment
+13. Review Agent checks acceptance criteria and merges the PR
 14. Jira Update Agent moves ticket to Done and posts PR link
 15. Execution monitor shows the full ticket lifecycle with correct state transitions
 
@@ -723,4 +772,5 @@ The MVP is complete when a live end-to-end demo runs without human intervention 
 
 ---
 
-*Spec version: 1.0 | Created: May 2026 | Project: AEO*
+*Spec version: 1.1 | Updated: May 2026 | Project: AEO*
+*Change in v1.1: Dev Agent replaced by GitHub Copilot. Planning Agent now owns issue creation + Copilot assignment. QA retry re-assigns Copilot with error context.*
